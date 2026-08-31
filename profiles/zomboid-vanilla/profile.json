@@ -1,0 +1,17 @@
+{
+  "$schema": "../schema.json",
+  "schema_version": 1,
+  "game": "zomboid",
+  "id": "zomboid-vanilla",
+  "display_name": "Project Zomboid vanilla B42",
+  "gameplay": "vanilla-like",
+  "zomboid_build": "42.20",
+  "loader": {
+    "type": "workshop",
+    "version": null
+  },
+  "compose_file": "compose.yaml",
+  "mods": {
+    "source": null
+  }
+}

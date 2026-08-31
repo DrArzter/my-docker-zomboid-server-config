@@ -1,0 +1,27 @@
+# Standalone local runtime for this profile. The dedicated server is a separate
+# Steam app that installs with an anonymous login, so nothing here needs a Steam
+# account; players need to own the game.
+services:
+  zomboid:
+    image: terule/pz-dedicated-server:latest
+    ports:
+      - "16261:16261/udp"
+      - "16262:16262/udp"
+      # RCON is an operator surface, never a player one.
+      - "127.0.0.1:27015:27015"
+    environment:
+      # This image documents no variable for the server name, so the server
+      # names its own save directory. Nothing here assumes what it picks.
+      RCON_PASSWORD: ${ZOMBOID_RCON_PASSWORD:?set ZOMBOID_RCON_PASSWORD in .env}
+      ADMIN_PASSWORD: ${ZOMBOID_ADMIN_PASSWORD:?set ZOMBOID_ADMIN_PASSWORD in .env}
+      MEMORY_XMX_GB: "${ZOMBOID_MEMORY_GB:-6}"
+    volumes:
+      # The mount is the game's Zomboid folder: Saves/, db/ and Server/ live
+      # inside it, which is what lets one archive hold a whole world.
+      - "./data:/project-zomboid-config"
+      - "zomboid-server-files:/project-zomboid"
+    restart: "no"
+    stop_grace_period: 180s
+
+volumes:
+  zomboid-server-files:

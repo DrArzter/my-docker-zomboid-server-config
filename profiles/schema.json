@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://spawnpoint.local/schemas/zomboid-profile-v1.json",
+  "title": "Project Zomboid server profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "game",
+    "id",
+    "display_name",
+    "gameplay",
+    "zomboid_build",
+    "loader",
+    "compose_file",
+    "mods"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schema_version": { "const": 1 },
+    "game": { "const": "zomboid" },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+    "display_name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "gameplay": { "enum": ["modded", "vanilla-like"] },
+    "zomboid_build": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)*$" },
+    "loader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "version"],
+      "properties": {
+        "type": { "const": "workshop" },
+        "version": { "type": "null" }
+      }
+    },
+    "compose_file": { "const": "compose.yaml" },
+    "mods": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": { "type": ["string", "null"] }
+      }
+    }
+  }
+}
