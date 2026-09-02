@@ -1,0 +1,83 @@
+name: Publish preset catalog
+
+run-name: Publish presets from ${{ github.sha }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "profiles/**"
+      - ".github/workflows/publish-presets.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: spawnpoint-preset-catalog
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish presets to Spawnpoint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      AWS_REGION: eu-central-1
+      RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
+      STATE_MACHINE_ARN: ${{ vars.AWS_PRESET_CATALOG_STATE_MACHINE_ARN }}
+      CONFIG_REPOSITORY_URL: https://github.com/DrArzter/my-docker-zomboid-server-config.git
+
+    steps:
+      - name: Check out the exact configuration commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate request
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ -n "${STATE_MACHINE_ARN}" ]] || { printf 'error: AWS_PRESET_CATALOG_STATE_MACHINE_ARN is missing\n' >&2; exit 1; }
+          [[ -n "${RELEASE_ROLE_ARN}" ]] || { printf 'error: AWS_RELEASE_ROLE_ARN is missing\n' >&2; exit 1; }
+
+      - name: Get short-lived AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.RELEASE_ROLE_ARN }}
+          role-session-name: github-presets-${{ github.run_id }}
+
+      - name: Publish and wait
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          request="$(jq -cn \
+            --arg configCommit "${GITHUB_SHA}" \
+            --arg configRepositoryUrl "${CONFIG_REPOSITORY_URL}" \
+            '{configCommit: $configCommit, configRepositoryUrl: $configRepositoryUrl}')"
+          execution_arn="$(aws stepfunctions start-execution \
+            --state-machine-arn "${STATE_MACHINE_ARN}" \
+            --name "catalog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --input "${request}" \
+            --query executionArn \
+            --output text)"
+          printf 'execution=%s\n' "${execution_arn}"
+
+          while true; do
+            description="$(aws stepfunctions describe-execution --execution-arn "${execution_arn}" --output json)"
+            status="$(jq -r '.status' <<<"${description}")"
+            printf 'status=%s\n' "${status}"
+            case "${status}" in
+              RUNNING) sleep 15 ;;
+              SUCCEEDED) exit 0 ;;
+              FAILED|TIMED_OUT|ABORTED)
+                jq -r '.error, .cause' <<<"${description}" >&2
+                exit 1
+                ;;
+              *) printf 'error: unexpected status: %s\n' "${status}" >&2; exit 1 ;;
+            esac
+          done
+
