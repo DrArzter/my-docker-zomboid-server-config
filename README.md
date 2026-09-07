@@ -63,3 +63,7 @@ payload at all.
 One consequence worth knowing before pinning: players' clients update their own Workshop mods, so a pinned server can
 fall behind them. The remedy is cutting a new release, which is the recorded and revertible version of the usual
 "restart the server so it re-pulls".
+
+Preset discovery uses short-lived AWS credentials and a content-addressed snapshot of the selected commit. Set
+`AWS_RELEASE_ROLE_ARN`, `AWS_PRESET_CATALOG_STATE_MACHINE_ARN`, and `AWS_RELEASE_BUCKET` as repository variables; the
+pipeline works for both public and private visibility.

@@ -28,6 +28,7 @@ jobs:
       AWS_REGION: eu-central-1
       RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
       STATE_MACHINE_ARN: ${{ vars.AWS_PRESET_CATALOG_STATE_MACHINE_ARN }}
+      RELEASE_BUCKET: ${{ vars.AWS_RELEASE_BUCKET }}
       CONFIG_REPOSITORY_URL: https://github.com/DrArzter/my-docker-zomboid-server-config.git
 
     steps:
@@ -42,6 +43,7 @@ jobs:
           [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ -n "${STATE_MACHINE_ARN}" ]] || { printf 'error: AWS_PRESET_CATALOG_STATE_MACHINE_ARN is missing\n' >&2; exit 1; }
           [[ -n "${RELEASE_ROLE_ARN}" ]] || { printf 'error: AWS_RELEASE_ROLE_ARN is missing\n' >&2; exit 1; }
+          [[ -n "${RELEASE_BUCKET}" ]] || { printf 'error: AWS_RELEASE_BUCKET is missing\n' >&2; exit 1; }
 
       - name: Get short-lived AWS credentials through OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -54,10 +56,29 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          source_archive="${RUNNER_TEMP}/config-source.tar.gz"
+          git archive --format=tar.gz --output="${source_archive}" "${GITHUB_SHA}" profiles
+          source_sha256="$(sha256sum -- "${source_archive}" | awk '{print $1}')"
+          source_key="config-sources/${GITHUB_REPOSITORY}/${GITHUB_SHA}.tar.gz"
+          if ! aws s3api put-object \
+            --bucket "${RELEASE_BUCKET}" \
+            --key "${source_key}" \
+            --body "${source_archive}" \
+            --metadata "sha256=${source_sha256}" \
+            --server-side-encryption AES256 \
+            --if-none-match '*' >/dev/null; then
+            existing_sha256="$(aws s3api head-object --bucket "${RELEASE_BUCKET}" --key "${source_key}" --query 'Metadata.sha256' --output text)"
+            [[ "${existing_sha256}" == "${source_sha256}" ]] || {
+              printf 'error: immutable config snapshot already exists with different contents\n' >&2
+              exit 1
+            }
+          fi
           request="$(jq -cn \
             --arg configCommit "${GITHUB_SHA}" \
             --arg configRepositoryUrl "${CONFIG_REPOSITORY_URL}" \
-            '{configCommit: $configCommit, configRepositoryUrl: $configRepositoryUrl}')"
+            --arg configSourceKey "${source_key}" \
+            --arg configSourceSha256 "${source_sha256}" \
+            '{configCommit: $configCommit, configRepositoryUrl: $configRepositoryUrl, configSourceKey: $configSourceKey, configSourceSha256: $configSourceSha256}')"
           execution_arn="$(aws stepfunctions start-execution \
             --state-machine-arn "${STATE_MACHINE_ARN}" \
             --name "catalog-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
@@ -80,4 +101,3 @@ jobs:
               *) printf 'error: unexpected status: %s\n' "${status}" >&2; exit 1 ;;
             esac
           done
-
