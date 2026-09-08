@@ -22,12 +22,13 @@ jobs:
   publish:
     name: Publish presets to Spawnpoint
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 120
 
     env:
       AWS_REGION: eu-central-1
       RELEASE_ROLE_ARN: ${{ vars.AWS_RELEASE_ROLE_ARN }}
       STATE_MACHINE_ARN: ${{ vars.AWS_PRESET_CATALOG_STATE_MACHINE_ARN }}
+      BUILD_STATE_MACHINE_ARN: ${{ vars.AWS_BUILD_RELEASE_STATE_MACHINE_ARN }}
       RELEASE_BUCKET: ${{ vars.AWS_RELEASE_BUCKET }}
       CONFIG_REPOSITORY_URL: https://github.com/DrArzter/my-docker-zomboid-server-config.git
 
@@ -42,6 +43,7 @@ jobs:
           [[ "${GITHUB_REF}" == "refs/heads/main" ]]
           [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ -n "${STATE_MACHINE_ARN}" ]] || { printf 'error: AWS_PRESET_CATALOG_STATE_MACHINE_ARN is missing\n' >&2; exit 1; }
+          [[ -n "${BUILD_STATE_MACHINE_ARN}" ]] || { printf 'error: AWS_BUILD_RELEASE_STATE_MACHINE_ARN is missing\n' >&2; exit 1; }
           [[ -n "${RELEASE_ROLE_ARN}" ]] || { printf 'error: AWS_RELEASE_ROLE_ARN is missing\n' >&2; exit 1; }
           [[ -n "${RELEASE_BUCKET}" ]] || { printf 'error: AWS_RELEASE_BUCKET is missing\n' >&2; exit 1; }
 
@@ -101,3 +103,63 @@ jobs:
               *) printf 'error: unexpected status: %s\n' "${status}" >&2; exit 1 ;;
             esac
           done
+
+      - name: Build new or changed presets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mapfile -t profile_files < <(find profiles -mindepth 2 -maxdepth 2 -type f -name profile.json -print | sort)
+          [[ "${#profile_files[@]}" -gt 0 ]]
+          game="$(jq -r '.game // "minecraft"' "${profile_files[0]}")"
+          catalog="${RUNNER_TEMP}/published-preset-catalog.json"
+          aws s3api get-object --bucket "${RELEASE_BUCKET}" --key "presets/${game}/catalog.json" "${catalog}" >/dev/null
+          mapfile -t profiles < <(jq -r '.presets[] | select(.build_status == "unbuilt") | .id' "${catalog}")
+          if [[ "${#profiles[@]}" -eq 0 ]]; then
+            printf 'result=no_builds_needed\n'
+            exit 0
+          fi
+
+          source_archive="${RUNNER_TEMP}/config-source.tar.gz"
+          source_sha256="$(sha256sum -- "${source_archive}" | awk '{print $1}')"
+          source_key="config-sources/${GITHUB_REPOSITORY}/${GITHUB_SHA}.tar.gz"
+          execution_arns=()
+          for index in "${!profiles[@]}"; do
+            profile="${profiles[${index}]}"
+            release="${GITHUB_RUN_ID}.$((index + 1))"
+            request="$(jq -cn \
+              --arg profileId "${profile}" \
+              --arg configCommit "${GITHUB_SHA}" \
+              --arg release "${release}" \
+              --arg configRepositoryUrl "${CONFIG_REPOSITORY_URL}" \
+              --arg configSourceKey "${source_key}" \
+              --arg configSourceSha256 "${source_sha256}" \
+              '{profileId: $profileId, configCommit: $configCommit, release: $release, configRepositoryUrl: $configRepositoryUrl, configSourceKey: $configSourceKey, configSourceSha256: $configSourceSha256}')"
+            execution_arn="$(aws stepfunctions start-execution \
+              --state-machine-arn "${BUILD_STATE_MACHINE_ARN}" \
+              --name "release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${index}" \
+              --input "${request}" \
+              --query executionArn \
+              --output text)"
+            execution_arns+=("${execution_arn}")
+            printf 'profile=%s release=%s execution=%s\n' "${profile}" "${release}" "${execution_arn}"
+          done
+
+          while true; do
+            remaining=0
+            for execution_arn in "${execution_arns[@]}"; do
+              description="$(aws stepfunctions describe-execution --execution-arn "${execution_arn}" --output json)"
+              status="$(jq -r '.status' <<<"${description}")"
+              case "${status}" in
+                RUNNING) remaining=$((remaining + 1)) ;;
+                SUCCEEDED) ;;
+                FAILED|TIMED_OUT|ABORTED)
+                  jq -r '.error // "unknown", .cause // "No cause returned"' <<<"${description}" >&2
+                  exit 1
+                  ;;
+                *) printf 'error: unexpected status: %s\n' "${status}" >&2; exit 1 ;;
+              esac
+            done
+            (( remaining > 0 )) || break
+            sleep 15
+          done
+          printf 'result=releases_ready builds=%s\n' "${#profiles[@]}"
